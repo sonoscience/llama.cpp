@@ -311,21 +311,65 @@ int main(int argc, char ** argv) {
     LOG_INF("Prompt: \"%s\"\n", params.prompt.c_str());
     LOG_INF("Tokens: %zu\n", tokens.size());
 
+    // Number of tokens to generate (use -n flag, default 128)
+    int n_predict = params.n_predict > 0 ? params.n_predict : 128;
+    LOG_INF("Will generate up to %d tokens\n", n_predict);
+
     // Signal generation start
     osc.send_generating(true);
 
     // Evaluate prompt (callback fires during decode)
-    LOG_INF("\nEvaluating...\n");
+    LOG_INF("\nProcessing prompt...\n");
     if (llama_decode(ctx, llama_batch_get_one(tokens.data(), tokens.size()))) {
-        LOG_ERR("Failed to decode\n");
+        LOG_ERR("Failed to decode prompt\n");
         osc.send_generating(false);
         return 1;
     }
 
+    // Initialize sampler
+    auto sparams = llama_sampler_chain_default_params();
+    llama_sampler * smpl = llama_sampler_chain_init(sparams);
+    llama_sampler_chain_add(smpl, llama_sampler_init_temp(0.8f));
+    llama_sampler_chain_add(smpl, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
+
+    // Generation loop
+    LOG_INF("\nGenerating...\n");
+    int n_generated = 0;
+    llama_token eos_token = llama_vocab_eos(vocab);
+
+    while (n_generated < n_predict) {
+        // Sample next token
+        llama_token new_token = llama_sampler_sample(smpl, ctx, -1);
+
+        // Check for end of generation
+        if (llama_vocab_is_eog(vocab, new_token)) {
+            LOG_INF("\n[EOS]\n");
+            break;
+        }
+
+        // Print the token
+        char buf[256];
+        int n = llama_token_to_piece(vocab, new_token, buf, sizeof(buf), 0, true);
+        if (n > 0) {
+            printf("%.*s", n, buf);
+            fflush(stdout);
+        }
+
+        // Decode the new token (callback fires here)
+        if (llama_decode(ctx, llama_batch_get_one(&new_token, 1))) {
+            LOG_ERR("\nFailed to decode token\n");
+            break;
+        }
+
+        n_generated++;
+    }
+
+    llama_sampler_free(smpl);
+
     // Signal generation end
     osc.send_generating(false);
 
-    LOG_INF("\nDone.\n");
+    LOG_INF("\n\nGenerated %d tokens.\n", n_generated);
     llama_perf_context_print(ctx);
 
     llama_backend_free();
