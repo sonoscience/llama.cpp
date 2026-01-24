@@ -52,53 +52,77 @@ OSCdef(\generating, { |msg|
 }, '/generating');
 
 // Handle /cv/{name}/{layer} messages
+// NOTE: Use nil to match ALL OSC messages, then filter by path prefix
+// (OSCdef with '/cv' only matches exactly '/cv', not '/cv/name/layer')
 OSCdef(\cvProjection, { |msg, time, addr, port|
     var path = msg[0].asString;
     var value = msg[1];
-    var parts = path.split($/);
-    var cvName, layer;
+    var parts, cvName, layer;
 
-    // Parse /cv/{name}/{layer}
-    if (parts.size >= 4) {
-        cvName = parts[2];
-        layer = parts[3].asInteger;
-
-        // Initialize storage if needed
-        if (~cvData[cvName].isNil) {
-            ~cvData[cvName] = Array.fill(~numLayers, 0);
-            ~cvNames.add(cvName);
-            ~smoothedValues[cvName] = 0;
-            // Create a control bus for this CV
-            ~cvBuses[cvName] = Bus.control(s, 1);
-            "New CV detected: %".format(cvName).postln;
-        };
-
-        // Store the value
-        if (layer > 0 && layer <= ~numLayers) {
-            ~cvData[cvName][layer - 1] = value;
-        };
-
-        // Update smoothed value (exponential moving average across layers)
-        ~smoothedValues[cvName] = ~cvData[cvName].mean;
-
-        // Write to control bus
-        ~cvBuses[cvName].set(~smoothedValues[cvName]);
+    // Debug: print first few raw messages
+    if (~oscDebugCount.isNil) { ~oscDebugCount = 0 };
+    if (~oscDebugCount < 20) {
+        "RAW OSC: path=% value=%".format(path, value).postln;
+        ~oscDebugCount = ~oscDebugCount + 1;
     };
-}, '/cv');
+
+    // Only process messages starting with /cv/
+    if (path.beginsWith("/cv/")) {
+        parts = path.split($/);
+
+        // Parse /cv/{name}/{layer}
+        if (parts.size >= 4) {
+            cvName = parts[2];
+            layer = parts[3].asInteger;
+
+            // Initialize storage if needed
+            if (~cvData[cvName].isNil) {
+                ~cvData[cvName] = Array.fill(~numLayers, 0);
+                ~cvNames.add(cvName);
+                ~smoothedValues[cvName] = 0;
+                "New CV detected: %".format(cvName).postln;
+            };
+
+            // Store the value
+            if (layer > 0 && layer <= ~numLayers) {
+                ~cvData[cvName][layer - 1] = value;
+            };
+
+            // Update smoothed value (mean across layers)
+            ~smoothedValues[cvName] = ~cvData[cvName].mean;
+
+            // Write to the appropriate pre-created bus based on CV name pattern
+            // Match by the semantic part of the name (empathy, optimism, ornate)
+            if (cvName.contains("empathy")) {
+                ~empathyBus !? { ~empathyBus.set(~smoothedValues[cvName]) };
+            };
+            if (cvName.contains("optimism")) {
+                ~optimismBus !? { ~optimismBus.set(~smoothedValues[cvName]) };
+            };
+            if (cvName.contains("ornate") || cvName.contains("language")) {
+                ~languageBus !? { ~languageBus.set(~smoothedValues[cvName]) };
+            };
+        };
+    };
+}, nil);  // nil matches ALL incoming OSC messages
 
 // Debug: print incoming values periodically
 ~debugTask = Task({
     loop {
+        "--- Status ---".postln;
+        // Show bus values if buses exist
+        if (~empathyBus.notNil) {
+            ~empathyBus.get({ |v| "  empathyBus[%]: %".format(~empathyBus.index, v.round(0.001)).postln });
+        };
+        if (~optimismBus.notNil) {
+            ~optimismBus.get({ |v| "  optimismBus[%]: %".format(~optimismBus.index, v.round(0.001)).postln });
+        };
+        if (~languageBus.notNil) {
+            ~languageBus.get({ |v| "  languageBus[%]: %".format(~languageBus.index, v.round(0.001)).postln });
+        };
+        // Show CV names detected
         if (~cvNames.size > 0) {
-            "--- CV Values ---".postln;
-            ~cvNames.do { |name|
-                "  %: % (layers min:% max:%)".format(
-                    name.asString.keep(30),
-                    ~smoothedValues[name].round(0.001),
-                    ~cvData[name].minItem.round(0.01),
-                    ~cvData[name].maxItem.round(0.01)
-                ).postln;
-            };
+            "  CVs detected: %".format(~cvNames.size).postln;
         };
         2.wait;
     };
@@ -109,65 +133,85 @@ OSCdef(\cvProjection, { |msg, time, addr, port|
 )
 
 // ============================================================
-// STEP 3: Run the synth (after llama-sonify sends some data)
+// STEP 3: Run the synth
 // ============================================================
 (
-// SynthDef: Three-voice drone controlled by CV projections
-SynthDef(\llamaDrone, {
-    arg out = 0,
-        empathyBus = 0,
-        optimismBus = 0,
-        languageBus = 0,
-        masterAmp = 0.3;
+// Pre-create control buses for the expected CVs
+// These will be written to by the OSC receiver when messages arrive
+~empathyBus = Bus.control(s, 1);
+~optimismBus = Bus.control(s, 1);
+~languageBus = Bus.control(s, 1);
 
-    var empathy, optimism, language;
-    var sig1, sig2, sig3, mix;
-    var freq1, freq2, freq3;
+// Set initial values (neutral)
+~empathyBus.set(0);
+~optimismBus.set(0);
+~languageBus.set(0);
 
-    // Read control values from buses (with lag for smoothing)
-    empathy = In.kr(empathyBus).lag(0.5).linlin(-3, 3, 0, 1);
-    optimism = In.kr(optimismBus).lag(0.5).linlin(-3, 3, 0, 1);
-    language = In.kr(languageBus).lag(0.5).linlin(-3, 3, 0, 1);
+"Created control buses: empathy=%, optimism=%, language=%".format(
+    ~empathyBus.index, ~optimismBus.index, ~languageBus.index
+).postln;
 
-    // Voice 1: Empathy controls a warm pad
-    freq1 = empathy.linexp(0, 1, 80, 320);
-    sig1 = LFTri.ar(freq1) + LFTri.ar(freq1 * 1.5);
-    sig1 = LPF.ar(sig1, empathy.linexp(0, 1, 200, 2000));
-    sig1 = sig1 * empathy.linlin(0, 1, 0.1, 0.5);
+// Use fork to allow s.sync inside
+fork {
+    // SynthDef: Three-voice drone controlled by CV projections
+    SynthDef(\llamaDrone, {
+        arg out = 0,
+            empathyBus = 0,
+            optimismBus = 0,
+            languageBus = 0,
+            masterAmp = 0.3;
 
-    // Voice 2: Optimism controls brightness/shimmer
-    freq2 = optimism.linexp(0, 1, 200, 800);
-    sig2 = Saw.ar([freq2, freq2 * 1.01]) * 0.3;
-    sig2 = RLPF.ar(sig2, optimism.linexp(0, 1, 400, 4000), 0.3);
-    sig2 = sig2 * optimism.linlin(0, 1, 0.05, 0.4);
+        var empathy, optimism, language;
+        var sig1, sig2, sig3, mix;
+        var freq1, freq2, freq3;
 
-    // Voice 3: Language controls texture/complexity
-    freq3 = language.linexp(0, 1, 60, 240);
-    sig3 = Pulse.ar(freq3, language.linlin(0, 1, 0.1, 0.5));
-    sig3 = CombL.ar(sig3, 0.2, language.linlin(0, 1, 0.05, 0.15), 2);
-    sig3 = LPF.ar(sig3, language.linexp(0, 1, 300, 1500));
-    sig3 = sig3 * language.linlin(0, 1, 0.1, 0.3);
+        // Read control values from buses (with lag for smoothing)
+        empathy = In.kr(empathyBus).lag(0.5).linlin(-3, 3, 0, 1);
+        optimism = In.kr(optimismBus).lag(0.5).linlin(-3, 3, 0, 1);
+        language = In.kr(languageBus).lag(0.5).linlin(-3, 3, 0, 1);
 
-    // Mix and output
-    mix = (sig1 + sig2 + sig3) * masterAmp;
-    mix = LeakDC.ar(mix);
-    mix = Limiter.ar(mix, 0.9);
+        // Voice 1: Empathy controls a warm pad
+        freq1 = empathy.linexp(0, 1, 80, 320);
+        sig1 = LFTri.ar(freq1) + LFTri.ar(freq1 * 1.5);
+        sig1 = LPF.ar(sig1, empathy.linexp(0, 1, 200, 2000));
+        sig1 = sig1 * empathy.linlin(0, 1, 0.1, 0.5);
 
-    Out.ar(out, mix);
-}).add;
+        // Voice 2: Optimism controls brightness/shimmer
+        freq2 = optimism.linexp(0, 1, 200, 800);
+        sig2 = Saw.ar([freq2, freq2 * 1.01]) * 0.3;
+        sig2 = RLPF.ar(sig2, optimism.linexp(0, 1, 400, 4000), 0.3);
+        sig2 = sig2 * optimism.linlin(0, 1, 0.05, 0.4);
 
-// Wait for SynthDef to be ready
-s.sync;
+        // Voice 3: Language controls texture/complexity
+        freq3 = language.linexp(0, 1, 60, 240);
+        sig3 = Pulse.ar(freq3, language.linlin(0, 1, 0.1, 0.5));
+        sig3 = CombL.ar(sig3, 0.2, language.linlin(0, 1, 0.05, 0.15), 2);
+        sig3 = LPF.ar(sig3, language.linexp(0, 1, 300, 1500));
+        sig3 = sig3 * language.linlin(0, 1, 0.1, 0.3);
 
-// Start the synth (will use whatever buses exist)
-~synth = Synth(\llamaDrone, [
-    \empathyBus, ~cvBuses["qwen-2.5:7b-empathy_vs_sociopathy__empathy"] ?? Bus.control(s,1),
-    \optimismBus, ~cvBuses["qwen-2.5:7b-optimism_vs_nihilism__optimism"] ?? Bus.control(s,1),
-    \languageBus, ~cvBuses["qwen-2.5:7b-language__ornate"] ?? Bus.control(s,1),
-    \masterAmp, 0.3
-]);
+        // Mix and output
+        mix = (sig1 + sig2 + sig3) * masterAmp;
+        mix = LeakDC.ar(mix);
+        mix = Limiter.ar(mix, 0.9);
 
-"Synth started. Run llama-sonify to hear it respond.".postln;
+        Out.ar(out, mix);
+    }).add;
+
+    // Wait for SynthDef to be ready
+    s.sync;
+
+    // Start the synth with our pre-created buses
+    ~synth = Synth(\llamaDrone, [
+        \empathyBus, ~empathyBus.index,
+        \optimismBus, ~optimismBus.index,
+        \languageBus, ~languageBus.index,
+        \masterAmp, 0.3
+    ]);
+
+    "Synth started on buses: empathy=%, optimism=%, language=%".format(
+        ~empathyBus.index, ~optimismBus.index, ~languageBus.index
+    ).postln;
+};
 )
 
 // ============================================================
@@ -199,7 +243,9 @@ s.sync;
 ~debugTask.stop;
 OSCdef(\generating).free;
 OSCdef(\cvProjection).free;
-~synth.free;
-~cvBuses.do(_.free);
+~synth !? { ~synth.free };
+~empathyBus !? { ~empathyBus.free };
+~optimismBus !? { ~optimismBus.free };
+~languageBus !? { ~languageBus.free };
 "Cleaned up.".postln;
 )

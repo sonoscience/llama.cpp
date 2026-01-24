@@ -97,7 +97,12 @@ static bool sonify_callback(struct ggml_tensor * t, bool ask, void * user_data) 
 
     if (ask) {
         // Only interested in layer output tensors
-        return name.find("l_out") != std::string::npos;
+        bool want = name.find("l_out") != std::string::npos;
+        static int ask_count = 0;
+        if (++ask_count <= 50) {  // Log first 50 tensor names
+            LOG_INF("  [ask] tensor: %s -> %s\n", name.c_str(), want ? "YES" : "no");
+        }
+        return want;
     }
 
     // Parse layer index
@@ -135,10 +140,14 @@ static bool sonify_callback(struct ggml_tensor * t, bool ask, void * user_data) 
     const float * last_token = (const float *)(data_ptr + (seq_len - 1) * t->nb[1]);
 
     // Project onto each control vector and send via OSC
+    static int osc_count = 0;
     for (const auto & cv : ctx->cvs) {
         if (layer >= 1 && layer <= cv.n_layers) {
             float proj = cv.project(last_token, layer);
             ctx->osc->send_projection(cv.name.c_str(), layer, proj);
+            if (++osc_count <= 10) {  // Log first 10 OSC sends
+                LOG_INF("  [osc] /cv/%s/%d = %.3f\n", cv.name.c_str(), layer, proj);
+            }
         }
     }
 
