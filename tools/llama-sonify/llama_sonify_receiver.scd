@@ -11,7 +11,16 @@
 // ============================================================
 // STEP 1: Boot the server (Cmd+Enter on this line)
 // ============================================================
+(
+// Quit first
+s.quit;
+
+// Set the Scarlett as output device
+s.options.outDevice = "Scarlett 4i4 USB";
+
+// Boot again
 s.boot;
+)
 
 // ============================================================
 // STEP 2: Run this entire block (select all, Cmd+Enter)
@@ -49,22 +58,14 @@ OSCdef(\generating, { |msg|
     } {
         ">>> Generation STOPPED".postln;
     };
-}, '/generating');
+}, '/generating', recvPort: 9000);
 
-// Handle /cv/{name}/{layer} messages
-// NOTE: Use nil to match ALL OSC messages, then filter by path prefix
-// (OSCdef with '/cv' only matches exactly '/cv', not '/cv/name/layer')
-OSCdef(\cvProjection, { |msg, time, addr, port|
+// Handle /cv/{name}/{layer} messages using OSCFunc
+// We register a raw receiver that catches everything on port 9000
+~cvReceiver = OSCFunc({ |msg, time, addr, recvPort|
     var path = msg[0].asString;
     var value = msg[1];
     var parts, cvName, layer;
-
-    // Debug: print first few raw messages
-    if (~oscDebugCount.isNil) { ~oscDebugCount = 0 };
-    if (~oscDebugCount < 20) {
-        "RAW OSC: path=% value=%".format(path, value).postln;
-        ~oscDebugCount = ~oscDebugCount + 1;
-    };
 
     // Only process messages starting with /cv/
     if (path.beginsWith("/cv/")) {
@@ -74,6 +75,13 @@ OSCdef(\cvProjection, { |msg, time, addr, port|
         if (parts.size >= 4) {
             cvName = parts[2];
             layer = parts[3].asInteger;
+
+            // Debug: log first few CV messages
+            if (~oscDebugCount.isNil) { ~oscDebugCount = 0 };
+            if (~oscDebugCount < 10) {
+                "CV received: % layer=% value=%".format(cvName.keep(30), layer, value.round(0.01)).postln;
+                ~oscDebugCount = ~oscDebugCount + 1;
+            };
 
             // Initialize storage if needed
             if (~cvData[cvName].isNil) {
@@ -92,7 +100,6 @@ OSCdef(\cvProjection, { |msg, time, addr, port|
             ~smoothedValues[cvName] = ~cvData[cvName].mean;
 
             // Write to the appropriate pre-created bus based on CV name pattern
-            // Match by the semantic part of the name (empathy, optimism, ornate)
             if (cvName.contains("empathy")) {
                 ~empathyBus !? { ~empathyBus.set(~smoothedValues[cvName]) };
             };
@@ -104,7 +111,8 @@ OSCdef(\cvProjection, { |msg, time, addr, port|
             };
         };
     };
-}, nil);  // nil matches ALL incoming OSC messages
+}, nil, nil, 9000);  // path=nil, srcID=nil, recvPort=9000
+"CV receiver registered on port 9000".postln;
 
 // Debug: print incoming values periodically
 ~debugTask = Task({
@@ -242,7 +250,7 @@ s.sync;
 (
 ~debugTask.stop;
 OSCdef(\generating).free;
-OSCdef(\cvProjection).free;
+~cvReceiver !? { ~cvReceiver.free };
 ~synth !? { ~synth.free };
 ~empathyBus !? { ~empathyBus.free };
 ~optimismBus !? { ~optimismBus.free };
