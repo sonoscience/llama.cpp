@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "sc-debug": {
+      "command": "/Users/mgm/development/code/llama.cpp/tools/llama-sonify/.venv/bin/python",
+      "args": ["/Users/mgm/development/code/llama.cpp/tools/llama-sonify/mcp_sc_debug.py"]
+    }
+  }
+}
